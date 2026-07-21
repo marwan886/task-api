@@ -16,7 +16,7 @@ def test_root_and_health() -> None:
         "version": "1.0",
         "endpoints": ["/tasks"],
     }
-    assert client.get("/health").json() == {"status": "ok"}
+    assert client.get("/health").json() == {"status": "ok", "database": "ok"}
 
 
 def test_read_tasks_and_missing_task() -> None:
