@@ -1,3 +1,6 @@
+import os
+import sqlite3
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -64,7 +67,42 @@ SEED_TASKS = [
     Task(id=3, title="Test with Swagger UI", done=False),
 ]
 
-tasks: list[Task] = [task.model_copy() for task in SEED_TASKS]
+DATABASE_PATH = Path(os.getenv("TASK_DB_PATH", "tasks.db"))
+
+
+def get_connection() -> sqlite3.Connection:
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_database() -> None:
+    with get_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                done INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1))
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks (done)"
+        )
+        count = connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        if count == 0:
+            connection.executemany(
+                "INSERT INTO tasks (title, done) VALUES (?, ?)",
+                [(task.title, int(task.done)) for task in SEED_TASKS],
+            )
+
+
+init_database()
+
+
+def row_to_task(row: sqlite3.Row) -> Task:
+    return Task(id=row["id"], title=row["title"], done=bool(row["done"]))
 
 
 @app.exception_handler(HTTPException)
@@ -84,13 +122,16 @@ async def validation_error_handler(
 
 
 def find_task(task_id: int) -> Task:
-    task = next((item for item in tasks if item.id == task_id), None)
-    if task is None:
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT id, title, done FROM tasks WHERE id = ?", (task_id,)
+        ).fetchone()
+    if row is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Task {task_id} not found",
+            detail="Task not found",
         )
-    return task
+    return row_to_task(row)
 
 
 @app.get("/", summary="Describe the API")
@@ -110,13 +151,27 @@ def list_tasks(
     limit: Annotated[int, Query(ge=1)] | None = None,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[Task]:
-    result = tasks
+    clauses: list[str] = []
+    parameters: list[object] = []
     if done is not None:
-        result = [task for task in result if task.done is done]
+        clauses.append("done = ?")
+        parameters.append(int(done))
     if search:
-        query = search.casefold()
-        result = [task for task in result if query in task.title.casefold()]
-    return result[offset:] if limit is None else result[offset : offset + limit]
+        clauses.append("title LIKE ?")
+        parameters.append(f"%{search}%")
+    query = "SELECT id, title, done FROM tasks"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY id"
+    if limit is not None:
+        query += " LIMIT ? OFFSET ?"
+        parameters.extend([limit, offset])
+    elif offset:
+        query += " LIMIT -1 OFFSET ?"
+        parameters.append(offset)
+    with get_connection() as connection:
+        rows = connection.execute(query, parameters).fetchall()
+    return [row_to_task(row) for row in rows]
 
 
 @app.get("/tasks/{task_id}", response_model=Task, summary="Get one task")
@@ -131,20 +186,29 @@ def get_task(task_id: int) -> Task:
     summary="Create a task",
 )
 def create_task(payload: TaskCreate) -> Task:
-    next_id = max((task.id for task in tasks), default=0) + 1
-    task = Task(id=next_id, title=payload.title, done=False)
-    tasks.append(task)
-    return task
+    with get_connection() as connection:
+        cursor = connection.execute(
+            "INSERT INTO tasks (title, done) VALUES (?, ?)",
+            (payload.title, 0),
+        )
+        row = connection.execute(
+            "SELECT id, title, done FROM tasks WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+    return row_to_task(row)
 
 
 @app.put("/tasks/{task_id}", response_model=Task, summary="Update a task")
 def update_task(task_id: int, payload: TaskUpdate) -> Task:
     task = find_task(task_id)
-    if payload.title is not None:
-        task.title = payload.title
-    if payload.done is not None:
-        task.done = payload.done
-    return task
+    title = payload.title if payload.title is not None else task.title
+    done = payload.done if payload.done is not None else task.done
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE tasks SET title = ?, done = ? WHERE id = ?",
+            (title, int(done), task_id),
+        )
+    return find_task(task_id)
 
 
 @app.delete(
@@ -153,19 +217,37 @@ def update_task(task_id: int, payload: TaskUpdate) -> Task:
     summary="Delete a task",
 )
 def delete_task(task_id: int) -> Response:
-    task = find_task(task_id)
-    tasks.remove(task)
+    find_task(task_id)
+    with get_connection() as connection:
+        connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/stats", response_model=Stats, summary="Get task statistics")
 def get_stats() -> Stats:
-    completed = sum(task.done for task in tasks)
-    return Stats(total=len(tasks), done=completed, open=len(tasks) - completed)
+    with get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN done = 1 THEN 1 ELSE 0 END) AS done
+            FROM tasks
+            """
+        ).fetchone()
+    completed = row["done"] or 0
+    return Stats(total=row["total"], done=completed, open=row["total"] - completed)
 
 
 @app.post("/reset", response_model=list[Task], summary="Restore example tasks")
 def reset_tasks() -> list[Task]:
-    tasks.clear()
-    tasks.extend(task.model_copy() for task in SEED_TASKS)
-    return tasks
+    with get_connection() as connection:
+        connection.execute("DELETE FROM tasks")
+        connection.execute("DELETE FROM sqlite_sequence WHERE name = ?", ("tasks",))
+        connection.executemany(
+            "INSERT INTO tasks (title, done) VALUES (?, ?)",
+            [(task.title, int(task.done)) for task in SEED_TASKS],
+        )
+        rows = connection.execute(
+            "SELECT id, title, done FROM tasks ORDER BY id"
+        ).fetchall()
+    return [row_to_task(row) for row in rows]

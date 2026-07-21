@@ -13,3 +13,13 @@ curl -i -X PUT http://localhost:8000/tasks/4 -H "Content-Type: application/json"
 
 curl -i -X DELETE http://localhost:8000/tasks/4
 ```
+
+## SQL explored by hand
+
+```sql
+SELECT * FROM tasks;
+SELECT * FROM tasks WHERE done = 1;
+SELECT COUNT(*) FROM tasks;
+```
+
+`SELECT * FROM tasks WHERE done = 1;` returned only completed tasks, proving that the API and direct SQL queries read the same database file.

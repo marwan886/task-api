@@ -1,6 +1,6 @@
 # Task API
 
-A beginner-friendly CRUD API for an in-memory to-do list, built with Python and FastAPI. It supports creating, reading, updating, and deleting tasks, with interactive Swagger documentation.
+A database-backed CRUD API for a to-do list, built with Python, FastAPI, and SQLite. It supports creating, reading, updating, and deleting persistent tasks, with interactive Swagger documentation.
 
 Repository: <https://github.com/marwan886/task-api>
 
@@ -17,7 +17,23 @@ uvicorn main:app --reload
 
 On macOS or Linux, use `source .venv/bin/activate` instead of the Windows activation command.
 
-Open <http://localhost:8000/docs> for Swagger UI. The API stores data only in memory, so changes disappear when the server restarts. That is expected: there is no database in this assignment.
+Open <http://localhost:8000/docs> for Swagger UI. Tasks are stored in SQLite and remain available after the server restarts.
+
+## SQLite storage
+
+SQLite was chosen because it stores the entire database in one file, requires no separate database server, and survives application restarts. The application automatically creates `tasks.db`, creates the `tasks` table, and inserts three example tasks only when the table is empty.
+
+`tasks.db` lives in the project directory and is excluded from Git so every clone starts with a fresh database. Run `uvicorn main:app --reload`; no manual database setup is required.
+
+![The tasks table in SQLite](docs/database-screenshot.png)
+
+The API uses parameterized SQL queries for all client-provided values. For example:
+
+```sql
+SELECT * FROM tasks WHERE done = 1;
+```
+
+This returned only completed tasks. Changing rows through SQL is immediately visible through the API because both read the same `tasks.db` file.
 
 ## Endpoints
 
@@ -53,4 +69,4 @@ Try a complete create-update-delete cycle in Swagger UI at `/docs`.
 pytest -q
 ```
 
-The test suite checks the full CRUD cycle, validation, 400/404 errors, filters, pagination, statistics, reset behavior, and Swagger/OpenAPI availability.
+The test suite checks the full CRUD cycle, validation, 400/404 errors, filters, pagination, SQL statistics, reset behavior, persistence, idempotent database seeding, and Swagger/OpenAPI availability. The same endpoint tests still pass after moving from memory to SQLite, demonstrating that storage is an implementation detail rather than a change to the API contract.

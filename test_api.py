@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 
-from main import app
+from main import DATABASE_PATH, app, init_database
 
 
 client = TestClient(app)
@@ -24,7 +24,7 @@ def test_read_tasks_and_missing_task() -> None:
     assert client.get("/tasks/1").status_code == 200
     response = client.get("/tasks/99")
     assert response.status_code == 404
-    assert response.json() == {"error": "Task 99 not found"}
+    assert response.json() == {"error": "Task not found"}
 
 
 def test_full_crud_cycle() -> None:
@@ -74,3 +74,11 @@ def test_swagger_and_openapi_are_available() -> None:
         path in schema["paths"]
         for path in ["/tasks", "/tasks/{task_id}", "/health", "/stats", "/reset"]
     )
+
+
+def test_database_persistence_and_idempotent_seed() -> None:
+    created = client.post("/tasks", json={"title": "Survive restart"}).json()
+    init_database()
+    assert DATABASE_PATH.exists()
+    assert client.get(f"/tasks/{created['id']}").json() == created
+    assert len(client.get("/tasks").json()) == 4
