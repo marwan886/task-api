@@ -1,10 +1,11 @@
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from auth import get_current_user, get_supabase
 from database import DATABASE_PATH, IS_POSTGRES, SEED_TASKS, get_connection, init_database, placeholder
 
 
@@ -60,6 +61,20 @@ class Stats(BaseModel):
     open: int
 
 
+class AuthCredentials(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    email: str
+    password: str
+
+    @field_validator("email", "password")
+    @classmethod
+    def credentials_must_not_be_empty(cls, value: str) -> str:
+        if not value:
+            raise ValueError("email and password are required")
+        return value
+
+
 init_database()
 
 
@@ -107,6 +122,77 @@ def read_health() -> dict[str, str]:
     with get_connection() as connection:
         connection.execute("SELECT 1").fetchone()
     return {"status": "ok", "database": "ok"}
+
+
+@app.post("/auth/signup", status_code=status.HTTP_201_CREATED, summary="Create an account")
+def signup(payload: AuthCredentials) -> dict[str, object]:
+    try:
+        response = get_supabase().auth.sign_up(
+            {"email": payload.email, "password": payload.password}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    user = response.user
+    return {
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "created_at": str(user.created_at),
+        }
+    }
+
+
+@app.post("/auth/login", summary="Log in and receive tokens")
+def login(payload: AuthCredentials) -> dict[str, str]:
+    try:
+        response = get_supabase().auth.sign_in_with_password(
+            {"email": payload.email, "password": payload.password}
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid login credentials",
+        ) from exc
+    return {
+        "access_token": response.session.access_token,
+        "refresh_token": response.session.refresh_token,
+        "token_type": "bearer",
+    }
+
+
+@app.get("/public/info", summary="Read public information")
+def public_info() -> dict[str, str]:
+    return {"message": "Welcome stranger! This info is public."}
+
+
+@app.get("/protected/profile", summary="Read the current user profile")
+def protected_profile(user: object = Depends(get_current_user)) -> dict[str, str]:
+    return {
+        "id": str(user.id),
+        "email": user.email,
+        "created_at": str(user.created_at),
+    }
+
+
+@app.get("/protected/dashboard", summary="Read the private dashboard")
+def protected_dashboard(user: object = Depends(get_current_user)) -> dict[str, str]:
+    return {"message": f"Welcome {user.email}"}
+
+
+@app.post(
+    "/auth/logout",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Log out",
+)
+def logout(_user: object = Depends(get_current_user)) -> Response:
+    try:
+        get_supabase().auth.sign_out()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/tasks", response_model=list[Task], summary="List tasks")

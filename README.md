@@ -1,79 +1,80 @@
 # Task API
 
-A persistent CRUD API built with Python, FastAPI, PostgreSQL, and Docker Compose. The public API remains unchanged from the in-memory and SQLite versions while PostgreSQL now runs as a separate container.
+A FastAPI to-do API with PostgreSQL persistence, Docker Compose, and Supabase authentication. Users can sign up, log in, send a bearer access token to protected endpoints, and log out.
 
 Repository: <https://github.com/marwan886/task-api>
 
-## Run the complete stack
+## Configuration
 
-Docker Desktop or another Docker-compatible engine is required.
+Copy the example file and replace its placeholders:
 
 ```bash
 cp .env.example .env
+```
+
+On Windows PowerShell, run `Copy-Item .env.example .env`. Set `SUPABASE_URL` to the project URL and `SUPABASE_KEY` to the Supabase anon key. Never put the service-role key in this API or commit the real `.env` file. For assignment testing, email confirmation can be disabled in the Supabase authentication settings.
+
+The same file also configures PostgreSQL:
+
+| Variable | Purpose |
+|---|---|
+| `SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_KEY` | Public anon key used by Supabase Auth |
+| `DATABASE_URL` | PostgreSQL connection string used by the API |
+| `POSTGRES_PASSWORD` | Password used by the database container |
+| `POSTGRES_DB` | Database created on first startup |
+
+## Run the complete stack
+
+```bash
 docker compose up --build
 ```
 
-On Windows PowerShell, use `Copy-Item .env.example .env` for the first command. Change the placeholder password in both values inside `.env` before sharing or deploying the project. The real `.env` file is ignored by Git.
+The API runs at <http://localhost:3000> and Swagger UI at <http://localhost:3000/docs>. Stop it with `docker compose down`. The `taskdata` volume preserves tasks across restarts.
 
-The API is available at <http://localhost:3000>, Swagger UI at <http://localhost:3000/docs>, and PostgreSQL inside the Compose network at `db:5432`. The application creates the `tasks` table and inserts three example tasks only when the table is empty.
-
-Stop the stack with `docker compose down`. The named `taskdata` volume preserves rows across restarts. Use `docker compose down -v` only when you intentionally want a fresh database.
-
-## Configuration
-
-| Variable | Purpose | Example |
-|---|---|---|
-| `DATABASE_URL` | PostgreSQL connection string used by the API | `postgresql://postgres:change-me@db:5432/tasks` |
-| `POSTGRES_PASSWORD` | Password used by the PostgreSQL container | `change-me` |
-| `POSTGRES_DB` | Database created on first startup | `tasks` |
-
-Copy `.env.example` to `.env`; never commit the real file.
-
-## Endpoints
-
-| Method | Path | Purpose | Success |
-|---|---|---|---:|
-| GET | `/` | Describe the API | 200 |
-| GET | `/health` | Check the API and database | 200 |
-| GET | `/tasks` | List, filter, search, or paginate tasks | 200 |
-| GET | `/tasks/{id}` | Get one task | 200 |
-| POST | `/tasks` | Create a task | 201 |
-| PUT | `/tasks/{id}` | Update a task | 200 |
-| DELETE | `/tasks/{id}` | Delete a task | 204 |
-| GET | `/stats` | Count total, completed, and open tasks | 200 |
-| POST | `/reset` | Restore the example tasks | 200 |
-
-All client values are passed through parameterized SQL queries. Unknown task IDs return `404`, invalid request bodies return `400`, and errors use `{"error":"message"}`.
-
-## Example request
-
-```console
-$ curl -i -X POST http://localhost:3000/tasks -H "Content-Type: application/json" -d '{"title":"Buy milk"}'
-HTTP/1.1 201 Created
-content-type: application/json
-
-{"id":4,"title":"Buy milk","done":false}
-```
-
-## Inspect PostgreSQL
+For local development with an available PostgreSQL server:
 
 ```bash
-docker compose exec db psql -U postgres -d tasks -c "\dt"
-docker compose exec db psql -U postgres -d tasks -c "SELECT * FROM tasks ORDER BY id;"
+pip install -r requirements.txt
+uvicorn main:app --reload --port 3000
 ```
 
-![The tasks database table](docs/database-screenshot.png)
+## Authentication endpoints
 
-## Test and verify persistence
+| Method | Path | Access | Success |
+|---|---|---|---:|
+| POST | `/auth/signup` | Public | 201 |
+| POST | `/auth/login` | Public | 200 |
+| POST | `/auth/logout` | Bearer token | 204 |
+| GET | `/public/info` | Public | 200 |
+| GET | `/protected/profile` | Bearer token | 200 |
+| GET | `/protected/dashboard` | Bearer token | 200 |
 
-Run the unchanged endpoint contract tests:
+Sign up and log in with JSON credentials:
+
+```bash
+curl -X POST http://localhost:3000/auth/signup -H "Content-Type: application/json" -d '{"email":"student@example.com","password":"strong-password"}'
+curl -X POST http://localhost:3000/auth/login -H "Content-Type: application/json" -d '{"email":"student@example.com","password":"strong-password"}'
+```
+
+Copy the returned `access_token`, then call a protected endpoint:
+
+```bash
+curl http://localhost:3000/protected/profile -H "Authorization: Bearer ACCESS_TOKEN"
+```
+
+The reusable authentication dependency asks Supabase to verify the token and returns `401` for missing, invalid, or expired tokens. JWT payloads are readable, so sensitive information must not be placed inside them.
+
+![Swagger UI with bearer authentication](docs/swagger-auth.png)
+
+## CRUD endpoints
+
+The existing `/tasks`, `/tasks/{id}`, `/stats`, and `/reset` routes continue to use PostgreSQL. Unknown task IDs return `404`, invalid request bodies return `400`, and SQL values are parameterized.
+
+## Tests
 
 ```bash
 pytest -q
 ```
 
-To prove container persistence, create a task, run `docker compose down`, start again with `docker compose up`, and request `GET /tasks`. The row remains because `taskdata` lives outside the containers.
-
-The same endpoint tests pass across the in-memory, SQLite, and PostgreSQL implementations. This demonstrates that storage is an implementation detail: clients use the same URLs, bodies, responses, and status codes regardless of the database behind the API.
-
-The `/health` endpoint runs `SELECT 1` against the active database. A load balancer can use that result to stop routing traffic to an API instance whose database connection is unavailable.
+The automated suite covers CRUD plus signup, login, token verification, public access, protected access, and logout. Supabase is mocked during tests so credentials remain private; set the values from `.env.example` to exercise the live authentication service.

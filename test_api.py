@@ -1,5 +1,8 @@
 from fastapi.testclient import TestClient
+from types import SimpleNamespace
 
+import main
+from auth import get_current_user
 from main import DATABASE_PATH, app, init_database
 
 
@@ -82,3 +85,65 @@ def test_database_persistence_and_idempotent_seed() -> None:
     assert DATABASE_PATH.exists()
     assert client.get(f"/tasks/{created['id']}").json() == created
     assert len(client.get("/tasks").json()) == 4
+
+
+class FakeAuth:
+    def sign_up(self, _credentials: dict[str, str]) -> SimpleNamespace:
+        return SimpleNamespace(
+            user=SimpleNamespace(
+                id="user-123",
+                email="test@example.com",
+                created_at="2026-07-22T00:00:00Z",
+            )
+        )
+
+    def sign_in_with_password(self, _credentials: dict[str, str]) -> SimpleNamespace:
+        return SimpleNamespace(
+            session=SimpleNamespace(access_token="access-token", refresh_token="refresh-token")
+        )
+
+    def sign_out(self) -> None:
+        return None
+
+
+def test_signup_login_and_validation(monkeypatch) -> None:
+    fake = SimpleNamespace(auth=FakeAuth())
+    monkeypatch.setattr(main, "get_supabase", lambda: fake)
+    signup = client.post(
+        "/auth/signup", json={"email": "test@example.com", "password": "password123"}
+    )
+    assert signup.status_code == 201
+    assert signup.json()["user"]["email"] == "test@example.com"
+    login = client.post(
+        "/auth/login", json={"email": "test@example.com", "password": "password123"}
+    )
+    assert login.status_code == 200
+    assert login.json()["access_token"] == "access-token"
+    assert client.post("/auth/signup", json={"email": ""}).status_code == 400
+
+
+def test_public_and_protected_routes(monkeypatch) -> None:
+    user = SimpleNamespace(
+        id="user-123", email="test@example.com", created_at="2026-07-22T00:00:00Z"
+    )
+    app.dependency_overrides[get_current_user] = lambda: user
+    fake = SimpleNamespace(auth=FakeAuth())
+    monkeypatch.setattr(main, "get_supabase", lambda: fake)
+    try:
+        assert client.get("/public/info").status_code == 200
+        assert client.get("/protected/profile").json()["id"] == "user-123"
+        assert client.get("/protected/dashboard").status_code == 200
+        assert client.post("/auth/logout").status_code == 204
+    finally:
+        app.dependency_overrides.clear()
+    missing = client.get("/protected/profile")
+    assert missing.status_code == 401
+    assert missing.json() == {"error": "Access token required"}
+
+
+def test_swagger_has_bearer_security() -> None:
+    schema = client.get("/openapi.json").json()
+    schemes = schema["components"]["securitySchemes"]
+    assert schemes["HTTPBearer"]["scheme"] == "bearer"
+    assert schema["paths"]["/protected/profile"]["get"]["security"]
+    assert schema["paths"]["/auth/logout"]["post"]["security"]
